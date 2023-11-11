@@ -72,7 +72,9 @@ nameMatchesCN(Domain, Subject):-
 % time validity check. between Lower and Upper
 isTimeValid(Lower, Upper):-
     % now(T),
-    T = 1601603624,
+    %    T = 1601603624, % 2020-10-02
+    %T = 1698612640, % 2023-10-29
+    T = 1689792640, % 2023-07-19
     Lower < T, Upper > T.
 
 % Basic Constraints checks

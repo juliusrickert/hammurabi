@@ -1,12 +1,12 @@
+use ipaddress::IPAddress;
 use openssl::x509::X509;
+use rayon;
+use rayon::prelude::*;
 use serde::Deserialize;
 use std::env;
 use std::fs::File;
 use std::io::{Read, Write};
-use rayon;
-use rayon::prelude::*;
 use std::sync::Arc;
-use ipaddress::IPAddress;
 
 use docopt::Docopt;
 
@@ -16,7 +16,7 @@ Verifies certificate at <path> for host <hostname> using policy for client <clie
 <path> should be an absolute path, because rustls has some silly behavior regarding paths.
 
 Usage:
-  scale [options] <client> <mappingpath> <intpath> <outpath> --start=<start> --end=<end> [--ocsp]
+  scale [options] <client> <certspath> <intpath> <outpath> --start=<start> --end=<end> [--ocsp]
   scale (--version | -v)
   scale (--help | -h)
 
@@ -30,7 +30,7 @@ const FOOTER: &'static str = "-----END CERTIFICATE-----";
 #[derive(Debug, Deserialize)]
 struct Args {
     arg_client: String,
-    arg_mappingpath: String,
+    arg_certspath: String,
     arg_intpath: String,
     arg_outpath: String,
     flag_start: usize,
@@ -54,15 +54,16 @@ fn read_disk_certificate(filename: &str) -> std::io::Result<String> {
 }
 
 fn form_chain(leaf: &String, intpath: &str, ints: &String) -> String {
-    // Wrap leaf in Certificate header/Footer
-    let formatted_leaf = format!("{}\r\n{}\r\n{}\r\n", HEADER, leaf, FOOTER);
     let split_ints: Vec<&str> = ints.split(",").collect();
-    let p = split_ints.iter().map(|f| {
-        let filename = format!("{}/{}{}", intpath, f, ".pem");
-        let int = read_disk_certificate(&filename).unwrap();
-        format!("{}", int)
-    }).collect::<String>();
-    let formatted_chain = format!("{}{}", formatted_leaf, p);
+    let p = split_ints
+        .iter()
+        .map(|f| {
+            let filename = format!("{}/{}{}", intpath, f, ".pem");
+            let int = read_disk_certificate(&filename).unwrap();
+            format!("{}", int)
+        })
+        .collect::<String>();
+    let formatted_chain = format!("{}{}", leaf, p);
     format!("{}", formatted_chain)
 }
 
@@ -75,26 +76,30 @@ fn main() {
         .unwrap_or_else(|e| e.exit());
     //let pool = rayon::ThreadPoolBuilder::new().num_threads(args.arg_threads.unwrap_or(8)).build().unwrap();
     let arc = Arc::new(args);
-    (arc.flag_start..=arc.flag_end).into_par_iter().for_each(|n| {
-        let arc = Arc::clone(&arc);
-        let mut rdr = csv::ReaderBuilder::new()
-            .has_headers(false)
-            .flexible(true)
-            .from_path(format!("{}/cert-list-part-{}.txt", &arc.arg_mappingpath, n)).unwrap();
-        let mut out_file = File::create(format!("{}/cert-list-part-{}.csv", &arc.arg_outpath, n)).unwrap();
-        rdr.records().for_each(|f| {
+    (arc.flag_start..=arc.flag_end)
+        .into_par_iter()
+        .for_each(|n| {
+            let arc = Arc::clone(&arc);
+            let mut rdr = csv::ReaderBuilder::new()
+                .has_headers(false)
+                .flexible(true)
+                .from_path(format!("{}/certs-list_part{}.csv", &arc.arg_certspath, n*100))
+                .unwrap();
+            let mut out_file = File::create(format!("{}/evaluation-result_part{}.csv", &arc.arg_outpath, n*100)).unwrap();
+            rdr.records().for_each(|f| {
                 let index = rayon::current_thread_index().unwrap_or(1);
                 //let index = thread::current().id();
                 let record = f.unwrap();
                 let row: Row = record.deserialize(None).unwrap();
-                let chain_raw = form_chain(&row.certificate_bytes, &arc.arg_intpath, &row.ints);
+                // let chain_raw = form_chain(&row.certificate_bytes, &arc.arg_intpath, &row.ints);
+                let chain_raw = &row.certificate_bytes;
                 let mut chain = X509::stack_from_pem(&chain_raw.as_bytes()).unwrap();
                 match IPAddress::parse(row.domain.clone()) {
                     Ok(_) => {
                         println!("Skipping IP {}", row.domain);
-                        write!(out_file, "{},{},SKIPPED\n", row.sha256, row.domain).unwrap();
-                        return
-                    },
+                        write!(&mut out_file, "{},{},SKIPPED\n", row.sha256, row.domain).unwrap();
+                        return;
+                    }
                     _ => {}
                 }
                 let domain = &row.domain.to_lowercase();
@@ -106,7 +111,7 @@ fn main() {
                         let result = hammurabi::verify_chain(&job_dir, &arc.arg_client);
                         let result_str = match result {
                             Ok(_) => "OK".to_string(),
-                            Err(e) =>{
+                            Err(e) => {
                                 format!("{:?}", e)
                             }
                         };
@@ -118,10 +123,8 @@ fn main() {
                         write!(out_file, "{},{},{:?}\n", row.sha256, domain, e).unwrap();
                     }
                 }
-            //pool.spawn(move || {
-            //});
+                //pool.spawn(move || {
+                //});
+            });
         });
-    });
 }
-
-
